@@ -5,7 +5,7 @@ library(MatchIt)
 library(rpart.plot)
 library(rgdal)
 library(stargazer)
-
+set.seed("1269")
 source("causal_tree_functions.R")
 sourceCpp("split.cpp")
 
@@ -266,180 +266,181 @@ matched.dta <- match.data(pscore.Calc)
 matched.dta.ntl <- merge(matched.dta, tDta[c("postNTL")], by="row.names")
 
 
-###########################################
-###########################################
-###########################################
-###########################################
-###########################################
-#Tree - Hansen
-###########################################
-###########################################
-###########################################
-###########################################
-###########################################
-matched.dtaB <- matched.dta[as.numeric(matched.dta$distance) < 0.99,]
-matched.dtaB <- matched.dtaB[as.numeric(matched.dta$distance) > 0.01,]
-tDta$hansenOutcome <- tDta$posthansen - tDta$prehansen
-matched.dta.hansen <- merge(matched.dtaB, tDta[c("hansenOutcome")], by="row.names")
-
-transOutcome <- list(rep(0,nrow(matched.dta.hansen)))
-
-for(i in 1:nrow(matched.dta.hansen))
-{
-  if(matched.dta.hansen$Treatment[i] == 1)
+  ###########################################
+  ###########################################
+  ###########################################
+  ###########################################
+  ###########################################
+  #Tree - Hansen
+  ###########################################
+  ###########################################
+  ###########################################
+  ###########################################
+  ###########################################
+  matched.dtaB <- matched.dta[as.numeric(matched.dta$distance) < 0.99,]
+  matched.dtaB <- matched.dtaB[as.numeric(matched.dta$distance) > 0.01,]
+  tDta$hansenOutcome <- tDta$posthansen - tDta$prehansen
+  matched.dta.hansen <- merge(matched.dtaB, tDta[c("hansenOutcome")], by="row.names")
+  
+  transOutcome <- list(rep(0,nrow(matched.dta.hansen)))
+  
+  for(i in 1:nrow(matched.dta.hansen))
   {
-    #Treated
-    transOutcome[i] = matched.dta.hansen$hansenOutcome[i] * 
-      (1 / matched.dta.hansen$distance[i])
+    if(matched.dta.hansen$Treatment[i] == 1)
+    {
+      #Treated
+      transOutcome[i] = matched.dta.hansen$hansenOutcome[i] * 
+        (1 / matched.dta.hansen$distance[i])
+    }
+    else
+    {
+      #Untreated
+      transOutcome[i] = -1 * (matched.dta.hansen$hansenOutcome[i] * 
+                                ((1-0) / (1 - matched.dta.hansen$distance[i])))
+    }
   }
-  else
+  matched.dta.hansen$transOutcome <- unlist(transOutcome)
+  
+  alist <- list(eval=ctev, split=ctsplit, init=ctinit)
+  dbb = matched.dta.hansen
+  k = 10
+  n = dim(dbb)[1]
+  crxvdata = dbb
+  crxvdata$id <- sample(1:k, nrow(crxvdata), replace = TRUE)
+  list = 1:k
+  m.split = 200
+  
+  errset = list()
+  
+  
+  
+  for (i in 1:k){
+    errset[[i]] = list()
+    trainingset <- subset(crxvdata, id %in% list[-i])
+    sub.fit = rpart(cbind(trainingset$hansenOutcome,trainingset$Treatment,
+                          trainingset$distance,trainingset$transOutcome) ~
+                      prehansen_absolute + prehansen +
+                      preLTDR + preNTL +
+                      distance_to_coast.na.mean+
+                      dist_to_groads.na.mean+
+                      dist_to_water.na.mean+
+                      dist_to_gadm28_borders.na.mean+
+                      wdpa_iucn.na.categorical_mix+
+                      udel_precip_v4_01_yearly_max.2000.mean+
+                      udel_air_temp_v4_01_yearly_max.2000.mean+
+                      udel_air_temp_v4_01_yearly_mean.2000.mean+
+                      udel_precip_v4_01_yearly_min.2000.mean+
+                      modis_lst_day_yearly_mean.2001.mean+
+                      srtm_slope_500m.na.mean+
+                      srtm_elevation_500m.na.mean+
+                      air_pollution_o3.2000.mean+
+                      gpw_v3_density.2000.mean+
+                      gpw_v3_count.2000.sum+
+                      accessibility_map.na.mean,
+                    trainingset,
+                    control = rpart.control(cp = 0,minsplit = m.split),
+                    method=alist)
+    sub.fit.dm = data.matrix(sub.fit$frame)
+    index = as.numeric(rownames(sub.fit$frame))
+    removed_nodes = 0
+    #fit1$frame$var = as.numeric(fit1$frame$var)
+    removed_nodes = cross_validate(sub.fit.dm, index,removed_nodes)
+    removed_nodes = removed_nodes[-1]
+    #errset[i] = rep(0,length(removed_nodes))
+    for(l in 1:length(removed_nodes)){
+      error = 0
+      sub.fit.pred = snip.rpart(sub.fit, removed_nodes[1:l])
+      
+      #Subset Fit
+      testset <- subset(crxvdata, id %in% c(i))
+      pt = predict(sub.fit.pred,testset,type = "matrix")
+      y = data.frame(pt)
+      val = data.matrix(y)
+      idx = as.numeric(rownames(testset))
+      dbidx = as.numeric(rownames(dbb))
+      
+      for(pid in 1:(dim(y)[1])){
+        id = match(idx[pid],dbidx)
+        error = error + (dbb$transOutcome[id] - val[pid])^2
+      }
+      
+      if(error == 0){
+        errset[[i]][l] = 1000000
+      }
+      else{
+        errset[[i]][l] = error/k
+      }
+    }
+  }
+  
+  #Identify the average error to depth ratio across all cross-validations
+  avg.index <- vector()
+  for(e in 1:length(errset))
   {
-    #Untreated
-    transOutcome[i] = -1 * (matched.dta.hansen$hansenOutcome[i] * 
-                              ((1-0) / (1 - matched.dta.hansen$distance[i])))
+    avg.index[e] <- which.min(errset[[e]])
   }
-}
-matched.dta.hansen$transOutcome <- unlist(transOutcome)
-
-alist <- list(eval=ctev, split=ctsplit, init=ctinit)
-dbb = matched.dta.hansen
-k = 5
-n = dim(dbb)[1]
-crxvdata = dbb
-crxvdata$id <- sample(1:k, nrow(crxvdata), replace = TRUE)
-list = 1:k
-m.split = 250
-
-errset = list()
-
-
-
-for (i in 1:k){
-  errset[[i]] = list()
-  trainingset <- subset(crxvdata, id %in% list[-i])
-  sub.fit = rpart(cbind(trainingset$hansenOutcome,trainingset$Treatment,
-                        trainingset$distance,trainingset$transOutcome) ~
-                    prehansen_absolute + prehansen +
-                    preLTDR + preNTL +
-                    distance_to_coast.na.mean+
-                    dist_to_groads.na.mean+
-                    dist_to_water.na.mean+
-                    dist_to_gadm28_borders.na.mean+
-                    wdpa_iucn.na.categorical_mix+
-                    udel_precip_v4_01_yearly_max.2000.mean+
-                    udel_air_temp_v4_01_yearly_max.2000.mean+
-                    udel_air_temp_v4_01_yearly_mean.2000.mean+
-                    udel_precip_v4_01_yearly_min.2000.mean+
-                    modis_lst_day_yearly_mean.2001.mean+
-                    srtm_slope_500m.na.mean+
-                    srtm_elevation_500m.na.mean+
-                    air_pollution_o3.2000.mean+
-                    gpw_v3_density.2000.mean+
-                    gpw_v3_count.2000.sum+
-                    accessibility_map.na.mean,
-                  trainingset,
-                  control = rpart.control(cp = 0,minsplit = m.split),
-                  method=alist)
-  sub.fit.dm = data.matrix(sub.fit$frame)
-  index = as.numeric(rownames(sub.fit$frame))
+  
+  #---------------
+  #Build Final Tree
+  #---------------
+  fit1 = rpart(cbind(crxvdata$hansenOutcome,crxvdata$Treatment,
+                     crxvdata$distance,crxvdata$transOutcome) ~
+                 prehansen_absolute + prehansen +
+                 preLTDR + preNTL +
+                 distance_to_coast.na.mean+
+                 dist_to_groads.na.mean+
+                 dist_to_water.na.mean+
+                 dist_to_gadm28_borders.na.mean+
+                 wdpa_iucn.na.categorical_mix+
+                 udel_precip_v4_01_yearly_max.2000.mean+
+                 udel_air_temp_v4_01_yearly_max.2000.mean+
+                 udel_air_temp_v4_01_yearly_mean.2000.mean+
+                 udel_precip_v4_01_yearly_min.2000.mean+
+                 modis_lst_day_yearly_mean.2001.mean+
+                 srtm_slope_500m.na.mean+
+                 srtm_elevation_500m.na.mean+
+                 air_pollution_o3.2000.mean+
+                 gpw_v3_density.2000.mean+
+                 gpw_v3_count.2000.sum+
+                 accessibility_map.na.mean,
+               crxvdata,
+               control = rpart.control(cp = 0,minsplit = m.split),
+               method=alist)
+  fit = data.matrix(fit1$frame)
+  index = as.numeric(rownames(fit1$frame))
+  
+  
   removed_nodes = 0
-  #fit1$frame$var = as.numeric(fit1$frame$var)
-  removed_nodes = cross_validate(sub.fit.dm, index,removed_nodes)
+  removed_nodes = cross_validate(fit, index,removed_nodes)
   removed_nodes = removed_nodes[-1]
-  #errset[i] = rep(0,length(removed_nodes))
-  for(l in 1:length(removed_nodes)){
-    error = 0
-    sub.fit.pred = snip.rpart(sub.fit, removed_nodes[1:l])
-    
-    #Subset Fit
-    testset <- subset(crxvdata, id %in% c(i))
-    pt = predict(sub.fit.pred,testset,type = "matrix")
-    y = data.frame(pt)
-    val = data.matrix(y)
-    idx = as.numeric(rownames(testset))
-    dbidx = as.numeric(rownames(dbb))
-    
-    for(pid in 1:(dim(y)[1])){
-      id = match(idx[pid],dbidx)
-      error = error + (dbb$transOutcome[id] - val[pid])^2
-    }
-    
-    if(error == 0){
-      errset[[i]][l] = 1000000
-    }
-    else{
-      errset[[i]][l] = error/k
-    }
-  }
-}
-
-#Identify the average error to depth ratio across all cross-validations
-avg.index <- vector()
-for(e in 1:length(errset))
-{
-  avg.index[e] <- which.min(errset[[e]])
-}
-
-#---------------
-#Build Final Tree
-#---------------
-fit1 = rpart(cbind(crxvdata$hansenOutcome,crxvdata$Treatment,
-                   crxvdata$distance,crxvdata$transOutcome) ~
-               prehansen_absolute + prehansen +
-               preLTDR + preNTL +
-               distance_to_coast.na.mean+
-               dist_to_groads.na.mean+
-               dist_to_water.na.mean+
-               dist_to_gadm28_borders.na.mean+
-               wdpa_iucn.na.categorical_mix+
-               udel_precip_v4_01_yearly_max.2000.mean+
-               udel_air_temp_v4_01_yearly_max.2000.mean+
-               udel_air_temp_v4_01_yearly_mean.2000.mean+
-               udel_precip_v4_01_yearly_min.2000.mean+
-               modis_lst_day_yearly_mean.2001.mean+
-               srtm_slope_500m.na.mean+
-               srtm_elevation_500m.na.mean+
-               air_pollution_o3.2000.mean+
-               gpw_v3_density.2000.mean+
-               gpw_v3_count.2000.sum+
-               accessibility_map.na.mean,
-             crxvdata,
-             control = rpart.control(cp = 0,minsplit = m.split),
-             method=alist)
-fit = data.matrix(fit1$frame)
-index = as.numeric(rownames(fit1$frame))
-
-
-removed_nodes = 0
-removed_nodes = cross_validate(fit, index,removed_nodes)
-removed_nodes = removed_nodes[-1]
-pruned_nodes = removed_nodes[1:round(mean(avg.index))]
-final.tree <- snip.rpart(fit1, pruned_nodes)
-
-#Prep for output
-print.tree <- final.tree
-levels(print.tree $frame$var)[levels(print.tree $frame$var)=="prehansen"] <- "Base Defor. (Rel)"
-levels(print.tree $frame$var)[levels(print.tree $frame$var)=="gpw_v3_count.2000.sum"] <- "Absolute Population"
-levels(print.tree $frame$var)[levels(print.tree $frame$var)=="udel_precip_v4_01_yearly_max.2000.mean"] <- "Max Precip"
-levels(print.tree $frame$var)[levels(print.tree $frame$var)=="air_pollution_o3.2000.mean"] <- "Ozone Concentration"
-levels(print.tree $frame$var)[levels(print.tree $frame$var)=="preLTDR"] <- "Vegetation Density"
-levels(print.tree $frame$var)[levels(print.tree $frame$var)=="gpw_v3_density.2000.mean"] <- "Population Density"
-levels(print.tree $frame$var)[levels(print.tree $frame$var)=="srtm_elevation_500m.na.mean"] <- "Slope"
-levels(print.tree $frame$var)[levels(print.tree $frame$var)=="prehansen_absolute"] <- "Base Defor. (Abs)"
-levels(print.tree $frame$var)[levels(print.tree $frame$var)=="distance_to_coast.na.mean"] <- "Dist. to Coast"
-levels(print.tree $frame$var)[levels(print.tree $frame$var)=="udel_precip_v4_01_yearly_min.2000.mean"] <- "Mean Precip"
-levels(print.tree $frame$var)[levels(print.tree $frame$var)=="srtm_slope_500m.na.mean"] <- "Slope"
-
-
-
-
-png("./GEF_LandCover.png", width = 1280, height = 720, res=300)
-rpart.plot(print.tree , cex=0.3, extra=1, branch=1, type=4, tweak=0.9, clip.right.labs=FALSE,
-           box.col=c("palegreen3", "pink")[findInterval(print.tree $frame$yval, v = c(-1,0))],
-           faclen=0,
-           varlen=0
-)
-dev.off()
+  pruned_nodes = removed_nodes[1:round(mean(avg.index))]
+  final.tree <- snip.rpart(fit1, pruned_nodes)
+  
+  #Prep for output
+  print.tree <- final.tree
+  levels(print.tree $frame$var)[levels(print.tree $frame$var)=="prehansen"] <- "Base Defor. (Rel)"
+  levels(print.tree $frame$var)[levels(print.tree $frame$var)=="gpw_v3_count.2000.sum"] <- "Absolute Population"
+  levels(print.tree $frame$var)[levels(print.tree $frame$var)=="udel_precip_v4_01_yearly_max.2000.mean"] <- "Max Precip"
+  levels(print.tree $frame$var)[levels(print.tree $frame$var)=="air_pollution_o3.2000.mean"] <- "Ozone Concentration"
+  levels(print.tree $frame$var)[levels(print.tree $frame$var)=="preLTDR"] <- "Vegetation Density"
+  levels(print.tree $frame$var)[levels(print.tree $frame$var)=="gpw_v3_density.2000.mean"] <- "Population Density"
+  levels(print.tree $frame$var)[levels(print.tree $frame$var)=="srtm_elevation_500m.na.mean"] <- "Slope"
+  levels(print.tree $frame$var)[levels(print.tree $frame$var)=="prehansen_absolute"] <- "Base Defor. (Abs)"
+  levels(print.tree $frame$var)[levels(print.tree $frame$var)=="distance_to_coast.na.mean"] <- "Dist. to Coast"
+  levels(print.tree $frame$var)[levels(print.tree $frame$var)=="udel_precip_v4_01_yearly_min.2000.mean"] <- "Mean Precip"
+  levels(print.tree $frame$var)[levels(print.tree $frame$var)=="srtm_slope_500m.na.mean"] <- "Slope"
+  levels(print.tree $frame$var)[levels(print.tree $frame$var)=="dist_to_groads.na.mean"] <- "Dist. to Roads"
+  
+  
+  
+  
+  png("./GEF_LandCover.png", width = 1280, height = 720, res=300)
+  rpart.plot(print.tree , cex=0.3, extra=1, branch=1, type=4, tweak=0.9, clip.right.labs=FALSE,
+             box.col=c("palegreen3", "pink")[findInterval(print.tree $frame$yval, v = c(-1,0))],
+             faclen=0,
+             varlen=0
+  )
+  dev.off()
 
 
 tDta$pred_hansen <- predict(final.tree, tDta)
@@ -461,7 +462,7 @@ matched.dtaB <- matched.dtaB[as.numeric(matched.dta$distance) > 0.01,]
 
 tDta$LTDRoutcome <- tDta$postLTDR - tDta$preLTDR
 matched.dta.ltdr <- merge(matched.dtaB, tDta[c("LTDRoutcome")], by="row.names")
-
+matched.dta.ltdr$LTDRoutcome <- matched.dta.ltdr$LTDRoutcome / 10000
 transOutcome <- list(rep(0,nrow(matched.dta.ltdr)))
 
 for(i in 1:nrow(matched.dta.ltdr))
@@ -509,7 +510,7 @@ tDtab$transOutcome <- unlist(transOutcome)
 
 alist <- list(eval=ctev, split=ctsplit, init=ctinit)
 dbb = matched.dta.ltdr
-k = 5
+k = 10
 n = dim(dbb)[1]
 crxvdata = dbb
 crxvdata$id <- sample(1:k, nrow(crxvdata), replace = TRUE)
@@ -642,11 +643,11 @@ levels(print.tree $frame$var)[levels(print.tree $frame$var)=="dist_to_gadm28_bor
 levels(print.tree $frame$var)[levels(print.tree $frame$var)=="accessibility_map.na.mean"] <- "Travel Time to Urban"
 
 levels(print.tree $frame$var)[levels(print.tree $frame$var)=="distance_to_coast.na.mean"] <- "Dist. to Coast"
-
+levels(print.tree $frame$var)[levels(print.tree $frame$var)=="prehansen"] <- "Base Defor."
 
 png("./GEF_LTDR.png", width = 1280, height = 720, res=300)
 rpart.plot(print.tree , cex=0.3, extra=1, branch=1, type=4, tweak=0.9, clip.right.labs=FALSE,
-           box.col=c("pink", "palegreen")[findInterval(print.tree $frame$yval, v = c(-10000,1))],
+           box.col=c("pink", "palegreen")[findInterval(print.tree $frame$yval, v = c(-10000,0))],
            faclen=0,
            varlen=0
 )
@@ -694,7 +695,7 @@ matched.dta.ltdr$transOutcome <- unlist(transOutcome)
 ###
 tDtab <- tDta
 tDtab$distance <- predict(pscore.Calc$model, tDtab, type="response")
-tDtab <- tDtab[as.numeric(tDtab$distance) < 0.8,] #.9, -381 #.8 -379
+tDtab <- tDtab[as.numeric(tDtab$distance) < 0.99,] #.9, -381 #.8 -379
 tDtab <- tDtab[as.numeric(tDtab$distance) > 0.2,]
 tDtab[is.na(tDtab$Treatment),] <- 1
 transOutcome <- list(rep(0,nrow(tDta)))
@@ -719,12 +720,12 @@ tDtab$transOutcome <- unlist(transOutcome)
 
 alist <- list(eval=ctev, split=ctsplit, init=ctinit)
 dbb = matched.dta.ltdr
-k = 5
+k = 10
 n = dim(dbb)[1]
 crxvdata = dbb
 crxvdata$id <- sample(1:k, nrow(crxvdata), replace = TRUE)
 list = 1:k
-m.split = 275
+m.split = 250
 
 errset = list()
 
@@ -737,7 +738,6 @@ for (i in 1:k){
                         trainingset$distance,trainingset$transOutcome) ~
                     prehansen_absolute + prehansen +
                     preLTDR + preNTL +
-                    distance_to_coast.na.mean+
                     dist_to_groads.na.mean+
                     dist_to_water.na.mean+
                     dist_to_gadm28_borders.na.mean+
@@ -802,7 +802,6 @@ fit1 = rpart(cbind(crxvdata$NTLoutcome,crxvdata$Treatment,
                    crxvdata$distance,crxvdata$transOutcome) ~
                prehansen_absolute + prehansen +
                preLTDR + preNTL +
-               distance_to_coast.na.mean+
                dist_to_groads.na.mean+
                dist_to_water.na.mean+
                dist_to_gadm28_borders.na.mean+
